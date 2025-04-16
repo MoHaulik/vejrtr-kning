@@ -42,7 +42,7 @@
     let analyser, dataArray;
     let particles, particleMaterial;
     let clock = new THREE.Clock();
-    // We save the original z positions here.
+    // Save the original z positions for each particle.
     let basePositions = [];
 
     // ------------------ Session & Breathing Variables ------------------
@@ -55,7 +55,7 @@
     const holdDuration = 60;        // breath hold phase duration in seconds
     const recoveryDuration = 15;    // recovery breath duration
     let cycleCount = 0;
-    const maxCycles = 3;          // Number of full cycles (can be set to 3-5)
+    const maxCycles = 3;          // Set to 3-5 for best experience
 
     // ------------------ Sound Objects ------------------
     // Assumes these sound files are in your GitHub repo.
@@ -241,10 +241,8 @@
           if (currentBreathStage !== lastBreathStage) {
             lastBreathStage = currentBreathStage;
             if (currentBreathStage === "inhale") {
-              // Play inhale sound.
               inhaleAudio.play();
             } else {
-              // Play exhale sound.
               exhaleAudio.play();
             }
           }
@@ -279,17 +277,17 @@
           }
         }
         // Recovery: a slow deep inhalation.
-        // Here we interpolate from an exhaled (forward) offset to an inhaled (backward) offset.
+        // Interpolate from an exhaled (forward) offset to an inhaled (backward) offset.
         const recoveryProgress = elapsed / recoveryDuration;
         const recoveryOffset = (0.5 + intensity) * ((1 - recoveryProgress) - recoveryProgress);
-        // Also gradually restore particle size by interpolating the size multiplier.
+        // Gradually restore particle size by interpolating the size multiplier.
         const recoverySizeMultiplier = 0.5 + 0.5 * recoveryProgress;
         updateParticlePositions(recoveryOffset, intensity, recoverySizeMultiplier);
         statusText = `Phase: Recovery Breath<br>Recovery Time: ${elapsed.toFixed(1)}s`;
       }
       document.getElementById('status').innerHTML = `Cycle: ${cycleCount + 1}/${maxCycles}<br>` + statusText;
 
-      // Optionally, you can add a slight overall rotation.
+      // Optionally, add a slight overall rotation.
       particles.rotation.z += 0.05 * delta;
 
       renderer.render(scene, camera);
