@@ -49,9 +49,11 @@
     let breathCount = 0;
     const maxBreaths = 30;
     let cycleCount = 0;
-    const maxCycles = 3; // Adjust to 3-5 cycles as desired.
+    const maxCycles = 3; // You can adjust to 3-5 cycles as desired.
     let isInhaling = false;
-    const breathThreshold = 0.2; // May require calibration based on mic sensitivity.
+    // Two thresholds to more reliably count a breath:
+    const inhaleThreshold = 0.3;   // When the mic input is high enough (inhalation)
+    const exhaleThreshold = 0.15;  // When the mic input falls low (exhalation)
     let holdStartTime = 0;
     let recoveryStartTime = 0;
 
@@ -150,7 +152,8 @@
             vColor = customColor;
             vec3 pos = position;
             float dist = length(pos);
-            pos.z += sin(dist * 4.0 - time * 2.0) * 0.5;
+            // Slow down the forward/backward motion by reducing the multiplier.
+            pos.z += sin(dist * 4.0 - time * 1.0) * 0.5;
             vAlpha = 1.0 - dist / 5.0;
             vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
             gl_PointSize = size * (300.0 / -mvPosition.z);
@@ -189,13 +192,13 @@
 
       // --- Phase Management ---
       if (phase === "breathing") {
-        // Use the mic input to detect inhalation/exhalation.
-        if (intensity > breathThreshold && !isInhaling) {
+        // Detect the start and end of an inhale/exhale cycle.
+        if (intensity > inhaleThreshold && !isInhaling) {
           isInhaling = true;
         }
-        if (intensity < breathThreshold && isInhaling) {
-          isInhaling = false;
+        if (intensity < exhaleThreshold && isInhaling) {
           breathCount++;
+          isInhaling = false;
           if (breathCount >= maxBreaths) {
             phase = "hold";
             holdStartTime = time;
@@ -203,7 +206,7 @@
         }
       } else if (phase === "hold") {
         // Transition to recovery if the user starts breathing again or 60 seconds elapse.
-        if (intensity > breathThreshold || (time - holdStartTime) > 60) {
+        if (intensity > inhaleThreshold || (time - holdStartTime) > 60) {
           phase = "recovery";
           recoveryStartTime = time;
         }
@@ -212,11 +215,9 @@
         if ((time - recoveryStartTime) > 15) {
           cycleCount++;
           if (cycleCount < maxCycles) {
-            // Reset for the next breathing cycle.
             breathCount = 0;
             phase = "breathing";
           } else {
-            // End the session.
             renderer.setAnimationLoop(null);
             document.getElementById('status').innerHTML = "Session Finished. Thank you!";
           }
@@ -230,12 +231,11 @@
         speedFactor = 0.2;  // Slower particle movement during hold.
         sizeMultiplier = 0.5;  // Particles shrink during hold.
       } else if (phase === "recovery") {
-        // Gradually ramp up the size during recovery.
         let t = Math.min((time - recoveryStartTime) / 15, 1.0);
         sizeMultiplier = 0.5 + 0.5 * t;
       }
 
-      // --- Update Particle Animation ---
+      // Update particle animation with slower forward/backward movement.
       particles.material.uniforms.time.value = time;
       const positions = particles.geometry.attributes.position.array;
       const sizes = particles.geometry.attributes.size.array;
@@ -243,16 +243,16 @@
         const x = positions[i];
         const y = positions[i + 1];
         const dist = Math.sqrt(x * x + y * y);
-        // Modify the z-axis animation using speedFactor.
-        positions[i + 2] = Math.sin(dist * 4 - time * 2 * speedFactor) * (0.5 + intensity);
-        // Adjust the particle sizes based on the current phase.
+        // Reduced time multiplier to slow the oscillation.
+        positions[i + 2] = Math.sin(dist * 4 - time * speedFactor) * (0.5 + intensity);
         sizes[i / 3] = ((0.5 + intensity * 3) * (1.0 - dist / 5.0)) * sizeMultiplier;
       }
       particles.geometry.attributes.position.needsUpdate = true;
       particles.geometry.attributes.size.needsUpdate = true;
+
       particles.rotation.z += 0.05 * delta * speedFactor;
 
-      // --- Update the Status Overlay ---
+      // Update the status overlay.
       let statusText = "";
       if (phase === "breathing") {
         statusText = `Cycle: ${cycleCount + 1}/${maxCycles}<br>Phase: Natural Breathing<br>Breaths: ${breathCount}/${maxBreaths}`;
