@@ -40,22 +40,28 @@
 
     let camera, scene, renderer;
     let analyser, dataArray;
-    let particles;
+    let particles, particleMaterial;
     let clock = new THREE.Clock();
+    // We save the original z positions here.
+    let basePositions = [];
 
-    // --- Breathing App Variables ---
-    // Phases: "breathing" (natural breathing), "hold" (breath hold), "recovery" (deep recovery breath)
-    let phase = "breathing"; 
-    let breathCount = 0;
-    const maxBreaths = 30;
+    // ------------------ Session & Breathing Variables ------------------
+    // Phases: "breathing", "hold", "recovery"
+    let phase = "breathing";
+    let phaseStartTime = 0;
+    // For natural breathing: 30 breaths at 6 seconds each (adjust as needed)
+    const naturalBreathingDuration = 30 * 6; // 180 seconds
+    const breathCycleDuration = 6;  // each full breath cycle lasts 6 seconds
+    const holdDuration = 60;        // breath hold phase duration in seconds
+    const recoveryDuration = 15;    // recovery breath duration
     let cycleCount = 0;
-    const maxCycles = 3; // You can adjust to 3-5 cycles as desired.
-    let isInhaling = false;
-    // Two thresholds to more reliably count a breath:
-    const inhaleThreshold = 0.3;   // When the mic input is high enough (inhalation)
-    const exhaleThreshold = 0.15;  // When the mic input falls low (exhalation)
-    let holdStartTime = 0;
-    let recoveryStartTime = 0;
+    const maxCycles = 3;          // Number of full cycles (can be set to 3-5)
+
+    // ------------------ Sound Objects ------------------
+    // Assumes these sound files are in your GitHub repo.
+    let inhaleAudio, exhaleAudio;
+    // To trigger sounds only once per transition.
+    let lastBreathStage = null;  // "inhale" or "exhale"
 
     init();
 
@@ -64,14 +70,14 @@
       scene = new THREE.Scene();
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
 
-      // Renderer with AR support.
+      // AR enabled renderer.
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
-      renderer.setClearColor(0x000000, 0); // Transparent background.
+      renderer.setClearColor(0x000000, 0);  // Transparent background.
       document.body.appendChild(renderer.domElement);
 
-      // Attach start button event.
+      // Button event: Start AR session.
       document.getElementById('start-button').addEventListener('click', () => {
         if (navigator.xr) {
           navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
@@ -94,10 +100,18 @@
       document.getElementById('start-button').style.display = 'none';
       document.getElementById('status').style.display = 'block';
 
+      // Set initial phase and its start time.
+      phase = "breathing";
+      phaseStartTime = clock.getElapsedTime();
+
+      // Create audio objects. (Ensure your browser allows autoplay after the user gesture.)
+      inhaleAudio = new Audio('inhale.mp3');
+      exhaleAudio = new Audio('exhale.mp3');
+
       // Begin the render loop.
       renderer.setAnimationLoop(render);
 
-      // Set up audio analysis from the mic.
+      // Set up microphone analysis (used only for modulating particle effects).
       navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then((stream) => {
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const source = audioContext.createMediaStreamSource(stream);
@@ -119,15 +133,23 @@
       const sizes = [];
 
       for (let i = 0; i < particleCount; i++) {
+        // Random polar coordinates for a circular distribution.
         const angle = Math.random() * Math.PI * 2;
         const radius = Math.sqrt(Math.random()) * 5;
         const x = radius * Math.cos(angle);
         const y = radius * Math.sin(angle);
+        // Random z value as a base.
         const z = (Math.random() - 0.5) * 2;
         positions.push(x, y, z);
+        basePositions.push(z);  // Save the original z.
 
-        const color = new THREE.Color();
-        color.setHSL(Math.random(), 0.7, 0.7);
+        // Create an "Apple-like" pastel colour.
+        // Choose a hue between 210° and 240° (cool blue range), with low–moderate saturation and high lightness.
+        let color = new THREE.Color();
+        const hue = 210 + Math.random() * 30;            // 210° to 240°
+        const saturation = 0.3 + Math.random() * 0.2;      // 0.3 to 0.5
+        const lightness = 0.75 + Math.random() * 0.1;      // 0.75 to 0.85
+        color.setHSL(hue / 360, saturation, lightness);
         colors.push(color.r, color.g, color.b);
 
         sizes.push(0.2 + Math.random() * 0.3);
@@ -137,7 +159,7 @@
       geometry.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
       geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
 
-      const material = new THREE.ShaderMaterial({
+      particleMaterial = new THREE.ShaderMaterial({
         uniforms: {
           pointTexture: { value: new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/disc.png') },
           time: { value: 0 },
@@ -151,10 +173,8 @@
           void main() {
             vColor = customColor;
             vec3 pos = position;
-            float dist = length(pos);
-            // Slow down the forward/backward motion by reducing the multiplier.
-            pos.z += sin(dist * 4.0 - time * 1.0) * 0.5;
-            vAlpha = 1.0 - dist / 5.0;
+            // The z coordinate will be updated in the render loop.
+            vAlpha = 1.0 - length(position) / 5.0;
             vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
             gl_PointSize = size * (300.0 / -mvPosition.z);
             gl_Position = projectionMatrix * mvPosition;
@@ -174,94 +194,103 @@
         depthWrite: false,
       });
 
-      particles = new THREE.Points(geometry, material);
+      particles = new THREE.Points(geometry, particleMaterial);
       scene.add(particles);
+    }
+
+    // Helper function to update particle positions and sizes.
+    function updateParticlePositions(offset, intensity, sizeMultiplier) {
+      const positions = particles.geometry.attributes.position.array;
+      const sizes = particles.geometry.attributes.size.array;
+      for (let i = 0; i < positions.length; i += 3) {
+        // Adjust z coordinate: add the computed offset to the original z value.
+        positions[i + 2] = basePositions[i / 3] + offset;
+        const x = positions[i];
+        const y = positions[i + 1];
+        const dist = Math.sqrt(x * x + y * y);
+        sizes[i / 3] = ((0.5 + intensity * 3) * (1.0 - dist / 5.0)) * sizeMultiplier;
+      }
+      particles.geometry.attributes.position.needsUpdate = true;
+      particles.geometry.attributes.size.needsUpdate = true;
     }
 
     function render() {
       const delta = clock.getDelta();
-      const time = clock.elapsedTime;
+      const currentTime = clock.getElapsedTime();
       let intensity = 0;
-      
-      // Get mic input intensity.
+      // Use mic input only for particle modulation.
       if (analyser) {
         analyser.getByteFrequencyData(dataArray);
         const avgFrequency = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
         intensity = avgFrequency / 255;
       }
 
-      // --- Phase Management ---
+      // ------------------ Phase Management ------------------
+      let statusText = "";
       if (phase === "breathing") {
-        // Detect the start and end of an inhale/exhale cycle.
-        if (intensity > inhaleThreshold && !isInhaling) {
-          isInhaling = true;
-        }
-        if (intensity < exhaleThreshold && isInhaling) {
-          breathCount++;
-          isInhaling = false;
-          if (breathCount >= maxBreaths) {
-            phase = "hold";
-            holdStartTime = time;
+        const elapsed = currentTime - phaseStartTime;
+        if (elapsed >= naturalBreathingDuration) {
+          phase = "hold";
+          phaseStartTime = currentTime;
+        } else {
+          // Compute breath cycle progress (0 to 1) for a 6-second cycle.
+          const breathProgress = (elapsed % breathCycleDuration) / breathCycleDuration;
+          // Determine current sub-phase: "inhale" for first half, "exhale" for second half.
+          const currentBreathStage = (breathProgress < 0.5) ? "inhale" : "exhale";
+          // If there is a transition, play the appropriate audio cue.
+          if (currentBreathStage !== lastBreathStage) {
+            lastBreathStage = currentBreathStage;
+            if (currentBreathStage === "inhale") {
+              // Play inhale sound.
+              inhaleAudio.play();
+            } else {
+              // Play exhale sound.
+              exhaleAudio.play();
+            }
           }
+          // Compute the breathing offset.
+          // The function is shifted so that at breathProgress = 0, sin(-π/2) = -1 (full inhale/backward)
+          // and at breathProgress = 0.5, sin(π/2)=1 (full exhale/forward).
+          const breathingOffset = (0.5 + intensity) * Math.sin(2 * Math.PI * (breathProgress - 0.25));
+          updateParticlePositions(breathingOffset, intensity, 1.0);
+          statusText = `Phase: Natural Breathing<br>Time: ${elapsed.toFixed(1)}s`;
         }
       } else if (phase === "hold") {
-        // Transition to recovery if the user starts breathing again or 60 seconds elapse.
-        if (intensity > inhaleThreshold || (time - holdStartTime) > 60) {
+        const elapsed = currentTime - phaseStartTime;
+        if (elapsed >= holdDuration) {
           phase = "recovery";
-          recoveryStartTime = time;
+          phaseStartTime = currentTime;
         }
+        // During hold, apply a very slow oscillation.
+        const holdOffset = (0.5 + intensity) * Math.sin(2 * Math.PI * (elapsed / 60));
+        updateParticlePositions(holdOffset, intensity, 0.5);
+        statusText = `Phase: Breath Hold<br>Hold Time: ${elapsed.toFixed(1)}s`;
       } else if (phase === "recovery") {
-        // After 15 seconds of recovery, complete the cycle.
-        if ((time - recoveryStartTime) > 15) {
+        const elapsed = currentTime - phaseStartTime;
+        if (elapsed >= recoveryDuration) {
           cycleCount++;
           if (cycleCount < maxCycles) {
-            breathCount = 0;
             phase = "breathing";
+            phaseStartTime = currentTime;
           } else {
             renderer.setAnimationLoop(null);
             document.getElementById('status').innerHTML = "Session Finished. Thank you!";
+            return;
           }
         }
+        // Recovery: a slow deep inhalation.
+        // Here we interpolate from an exhaled (forward) offset to an inhaled (backward) offset.
+        const recoveryProgress = elapsed / recoveryDuration;
+        const recoveryOffset = (0.5 + intensity) * ((1 - recoveryProgress) - recoveryProgress);
+        // Also gradually restore particle size by interpolating the size multiplier.
+        const recoverySizeMultiplier = 0.5 + 0.5 * recoveryProgress;
+        updateParticlePositions(recoveryOffset, intensity, recoverySizeMultiplier);
+        statusText = `Phase: Recovery Breath<br>Recovery Time: ${elapsed.toFixed(1)}s`;
       }
+      document.getElementById('status').innerHTML = `Cycle: ${cycleCount + 1}/${maxCycles}<br>` + statusText;
 
-      // --- Adjust Animation Parameters Based on Phase ---
-      let speedFactor = 1.0;
-      let sizeMultiplier = 1.0;
-      if (phase === "hold") {
-        speedFactor = 0.2;  // Slower particle movement during hold.
-        sizeMultiplier = 0.5;  // Particles shrink during hold.
-      } else if (phase === "recovery") {
-        let t = Math.min((time - recoveryStartTime) / 15, 1.0);
-        sizeMultiplier = 0.5 + 0.5 * t;
-      }
-
-      // Update particle animation with slower forward/backward movement.
-      particles.material.uniforms.time.value = time;
-      const positions = particles.geometry.attributes.position.array;
-      const sizes = particles.geometry.attributes.size.array;
-      for (let i = 0; i < positions.length; i += 3) {
-        const x = positions[i];
-        const y = positions[i + 1];
-        const dist = Math.sqrt(x * x + y * y);
-        // Reduced time multiplier to slow the oscillation.
-        positions[i + 2] = Math.sin(dist * 4 - time * speedFactor) * (0.5 + intensity);
-        sizes[i / 3] = ((0.5 + intensity * 3) * (1.0 - dist / 5.0)) * sizeMultiplier;
-      }
-      particles.geometry.attributes.position.needsUpdate = true;
-      particles.geometry.attributes.size.needsUpdate = true;
-
-      particles.rotation.z += 0.05 * delta * speedFactor;
-
-      // Update the status overlay.
-      let statusText = "";
-      if (phase === "breathing") {
-        statusText = `Cycle: ${cycleCount + 1}/${maxCycles}<br>Phase: Natural Breathing<br>Breaths: ${breathCount}/${maxBreaths}`;
-      } else if (phase === "hold") {
-        statusText = `Cycle: ${cycleCount + 1}/${maxCycles}<br>Phase: Breath Hold<br>Hold Time: ${(time - holdStartTime).toFixed(1)}s`;
-      } else if (phase === "recovery") {
-        statusText = `Cycle: ${cycleCount + 1}/${maxCycles}<br>Phase: Recovery Breath<br>Recovery Time: ${(time - recoveryStartTime).toFixed(1)}s`;
-      }
-      document.getElementById('status').innerHTML = statusText;
+      // Optionally, you can add a slight overall rotation.
+      particles.rotation.z += 0.05 * delta;
 
       renderer.render(scene, camera);
     }
